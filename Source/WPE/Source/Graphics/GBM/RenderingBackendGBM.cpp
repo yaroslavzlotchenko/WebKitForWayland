@@ -40,7 +40,8 @@ namespace Graphics {
 
 RenderingBackendGBM::RenderingBackendGBM()
 {
-    m_gbm.fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC | O_NOCTTY | O_NONBLOCK);
+    // FIXME: Use udev to find the dri node name.
+    m_gbm.fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC | O_NOCTTY | O_NONBLOCK);
     if (m_gbm.fd < 0) {
         fprintf(stderr, "RenderingBackendGBM: cannot open the render node.\n");
         return;

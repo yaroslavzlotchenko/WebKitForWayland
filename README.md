@@ -4,7 +4,7 @@ WebKit for Wayland
 To build:
 
     $ Tools/Scripts/update-webkitwpe-libs
-    $ Tools/Scripts/build-webkit --wpe
+    $ Tools/Scripts/build-webkit --wpe --cmakeargs="-DUSE_WPE_BACKEND_WAYLAND=ON -DUSE_GSTREAMER_GL=ON"
 
 To run (assuming you're executing under a Wayland compositor):
 

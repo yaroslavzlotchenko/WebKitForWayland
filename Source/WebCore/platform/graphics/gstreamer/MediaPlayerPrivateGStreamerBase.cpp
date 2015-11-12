@@ -648,9 +648,15 @@ void MediaPlayerPrivateGStreamerBase::updateTexture(BitmapTextureGL& texture, Gs
                     glActiveTexture (GL_TEXTURE2);
 
                 glBindTexture (GL_TEXTURE_2D, texture.id());
+#if PLATFORM(GBM)
+                static PFNGLEGLIMAGETARGETTEXTURE2DOESPROC eglImageTargetTexture2DOES = 0;
+                if (!eglImageTargetTexture2DOES)
+                    eglImageTargetTexture2DOES = (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress("glEGLImageTargetTexture2DOES");
+                eglImageTargetTexture2DOES (GL_TEXTURE_2D, gst_egl_image_memory_get_image (mem));
+#else
                 glEGLImageTargetTexture2DOES (GL_TEXTURE_2D,
                     gst_egl_image_memory_get_image (mem));
-
+#endif
                 m_orientation = gst_egl_image_memory_get_orientation (mem);
                 if (m_orientation != GST_VIDEO_GL_TEXTURE_ORIENTATION_X_NORMAL_Y_NORMAL
                     && m_orientation != GST_VIDEO_GL_TEXTURE_ORIENTATION_X_NORMAL_Y_FLIP) {
