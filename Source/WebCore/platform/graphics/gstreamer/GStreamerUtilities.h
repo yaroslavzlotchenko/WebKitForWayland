@@ -24,15 +24,15 @@
 
 #define TRACE_MEDIA_MESSAGE(...) do { \
     GST_TRACE(__VA_ARGS__); \
-    LOG_VERBOSE(Media, __VA_ARGS__); } while (0)
+    /* LOG_VERBOSE(Media, __VA_ARGS__); */ } while (0)
 
 #define LOG_MEDIA_MESSAGE(...) do { \
     GST_DEBUG(__VA_ARGS__); \
-    LOG_VERBOSE(Media, __VA_ARGS__); } while (0)
+    /* LOG_VERBOSE(Media, __VA_ARGS__); */ } while (0)
 
 #define ERROR_MEDIA_MESSAGE(...) do { \
     GST_ERROR(__VA_ARGS__); \
-    LOG_VERBOSE(Media, __VA_ARGS__); } while (0)
+    /* LOG_VERBOSE(Media, __VA_ARGS__); */ } while (0)
 
 #define INFO_MEDIA_MESSAGE(...) do { \
     GST_INFO(__VA_ARGS__); \
@@ -40,7 +40,7 @@
 
 #define WARN_MEDIA_MESSAGE(...) do { \
     GST_WARNING(__VA_ARGS__); \
-    LOG_VERBOSE(Media, __VA_ARGS__); } while (0)
+    /* LOG_VERBOSE(Media, __VA_ARGS__); */ } while (0)
 
 namespace WebCore {
 
