@@ -118,8 +118,14 @@ public:
     void connectToAppSinkFromAnyThread(GstPad* demuxersrcpad);
     void connectToAppSink(GstPad* demuxersrcpad);
 
+    bool emitCurrentSample();
+    bool flushCurrentSample();
+
     void scheduleDataStarveTimer();
     void cancelDataStarveTimer();
+
+    void scheduleLastSampleTimer();
+    void cancelLastSampleTimer();
 
 private:
     void resetPipeline();
@@ -183,6 +189,8 @@ private:
     RefPtr<WebCore::TrackPrivateBase> m_track;
 
     GRefPtr<GstBuffer> m_pendingBuffer;
+
+    RefPtr<GStreamerMediaSample> m_currentSample;
 };
 
 void MediaPlayerPrivateGStreamerMSE::registerMediaEngine(MediaEngineRegistrar registrar)
@@ -1020,7 +1028,6 @@ GStreamerMediaSample::GStreamerMediaSample(GstSample* sample, const FloatSize& p
     , m_duration(MediaTime::zeroTime())
     , m_trackID(trackID)
     , m_size(0)
-    , m_sample(0)
     , m_presentationSize(presentationSize)
     , m_flags(MediaSample::IsSync)
 {
@@ -1032,14 +1039,13 @@ GStreamerMediaSample::GStreamerMediaSample(GstSample* sample, const FloatSize& p
     if (!buffer)
         return;
 
+    m_buffers = gst_buffer_list_new();
+    m_caps = gst_caps_ref(gst_sample_get_caps(sample));
     if (GST_BUFFER_PTS_IS_VALID(buffer))
         m_pts = MediaTime(GST_BUFFER_PTS(buffer), GST_SECOND);
     if (GST_BUFFER_DTS_IS_VALID(buffer))
         m_dts = MediaTime(GST_BUFFER_DTS(buffer), GST_SECOND);
-    if (GST_BUFFER_DURATION_IS_VALID(buffer))
-        m_duration = MediaTime(GST_BUFFER_DURATION(buffer), GST_SECOND);
-    m_size = gst_buffer_get_size(buffer);
-    m_sample = gst_sample_ref(sample);
+    addBuffer(buffer);
 
     if (GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT))
         m_flags = MediaSample::None;
@@ -1065,6 +1071,18 @@ PassRefPtr<GStreamerMediaSample> GStreamerMediaSample::createFakeSample(GstCaps*
     return adoptRef(s);
 }
 
+void GStreamerMediaSample::addBuffer(GstBuffer* buffer)
+{
+    m_size += gst_buffer_get_size(buffer);
+    m_duration += MediaTime(GST_BUFFER_DURATION(buffer), GST_SECOND);
+    gst_buffer_list_add(m_buffers, gst_buffer_ref(buffer));
+}
+
+MediaTime GStreamerMediaSample::duration() const
+{
+    return m_duration;
+}
+
 void GStreamerMediaSample::applyPtsOffset(MediaTime timestampOffset)
 {
     if (m_pts > timestampOffset) {
@@ -1073,22 +1091,34 @@ void GStreamerMediaSample::applyPtsOffset(MediaTime timestampOffset)
     }
 }
 
-void GStreamerMediaSample::offsetTimestampsBy(const MediaTime& timestampOffset) {
+void GStreamerMediaSample::offsetTimestampsBy(const MediaTime& timestampOffset)
+{
     if (!timestampOffset)
         return;
+
     m_pts += timestampOffset;
     m_dts += timestampOffset;
-    GstBuffer* buffer = gst_sample_get_buffer(m_sample);
-    if (buffer) {
-        GST_BUFFER_PTS(buffer) = toGstClockTime(m_pts.toFloat());
-        GST_BUFFER_DTS(buffer) = toGstClockTime(m_dts.toFloat());
+
+    for (unsigned index = 0; index < gst_buffer_list_length(m_buffers); index++) {
+        GstBuffer* buffer = gst_buffer_list_get(m_buffers, index);
+        if (buffer) {
+            GST_BUFFER_PTS(buffer) = toGstClockTime(m_pts.toFloat());
+            GST_BUFFER_DTS(buffer) = toGstClockTime(m_dts.toFloat());
+        }
     }
 }
 
 GStreamerMediaSample::~GStreamerMediaSample()
 {
-    if (m_sample)
-        gst_sample_unref(m_sample);
+    if (m_caps) {
+        gst_caps_unref(m_caps);
+        m_caps = nullptr;
+    }
+
+    if (m_buffers) {
+        gst_buffer_list_unref(m_buffers);
+        m_buffers = nullptr;
+    }
 }
 
 // Auxiliar to pass several parameters to appendPipelineAppSinkNewSampleMainThread().
@@ -1263,15 +1293,13 @@ AppendPipeline::~AppendPipeline()
     if (m_dataStarvedTimeoutTag) {
         LOG_MEDIA_MESSAGE("m_dataStarvedTimeoutTag=%u", m_dataStarvedTimeoutTag);
         // TODO: Maybe notify appendComplete here?
-        g_source_remove(m_dataStarvedTimeoutTag);
-        m_dataStarvedTimeoutTag = 0;
+        cancelDataStarveTimer();
     }
 
     if (m_lastSampleTimeoutTag) {
         LOG_MEDIA_MESSAGE("m_lastSampleTimeoutTag=%u", m_lastSampleTimeoutTag);
         // TODO: Maybe notify appendComplete here?
-        g_source_remove(m_lastSampleTimeoutTag);
-        m_lastSampleTimeoutTag = 0;
+        cancelLastSampleTimer();
     }
 
     if (m_pipeline) {
@@ -1425,6 +1453,22 @@ void AppendPipeline::cancelDataStarveTimer()
     m_dataStarvedTimeoutTag = 0;
 }
 
+void AppendPipeline::scheduleLastSampleTimer()
+{
+    LOG_MEDIA_MESSAGE("Scheduling last sample timer");
+    m_lastSampleTimeoutTag = g_timeout_add(s_lastSampleTimeoutMsec, GSourceFunc(appendPipelineLastSampleTimeout), this);
+}
+
+void AppendPipeline::cancelLastSampleTimer()
+{
+    if (!m_lastSampleTimeoutTag)
+        return;
+
+    LOG_MEDIA_MESSAGE("Cancelling last sample timer");
+    g_source_remove(m_lastSampleTimeoutTag);
+    m_lastSampleTimeoutTag = 0;
+}
+
 void AppendPipeline::setAppendStage(AppendStage newAppendStage)
 {
     ASSERT(WTF::isMainThread());
@@ -1482,10 +1526,7 @@ void AppendPipeline::setAppendStage(AppendStage newAppendStage)
         case Invalid:
             ok = true;
             cancelDataStarveTimer();
-            if (m_lastSampleTimeoutTag) {
-                g_source_remove(m_lastSampleTimeoutTag);
-                m_lastSampleTimeoutTag = 0;
-            }
+            cancelLastSampleTimer();
             break;
         default:
             break;
@@ -1502,6 +1543,8 @@ void AppendPipeline::setAppendStage(AppendStage newAppendStage)
         case DataStarve:
             ok = true;
             cancelDataStarveTimer();
+            emitCurrentSample();
+            m_currentSample = nullptr;
             m_mediaSourceClient->didReceiveAllPendingSamples(m_sourceBufferPrivate.get());
             if (m_abortPending)
                 nextAppendStage = Aborting;
@@ -1514,18 +1557,14 @@ void AppendPipeline::setAppendStage(AppendStage newAppendStage)
 
             if (m_lastSampleTimeoutTag) {
                 TRACE_MEDIA_MESSAGE("lastSampleTimeoutTag already exists while transitioning Ongoing-->Sampling");
-                g_source_remove(m_lastSampleTimeoutTag);
-                m_lastSampleTimeoutTag = 0;
+                cancelLastSampleTimer();
             }
-            m_lastSampleTimeoutTag = g_timeout_add(s_lastSampleTimeoutMsec, GSourceFunc(appendPipelineLastSampleTimeout), this);
+            scheduleLastSampleTimer();
             break;
         case Invalid:
             ok = true;
             cancelDataStarveTimer();
-            if (m_lastSampleTimeoutTag) {
-                g_source_remove(m_lastSampleTimeoutTag);
-                m_lastSampleTimeoutTag = 0;
-            }
+            cancelLastSampleTimer();
             break;
         default:
             break;
@@ -1555,18 +1594,14 @@ void AppendPipeline::setAppendStage(AppendStage newAppendStage)
         switch (newAppendStage) {
         case Sampling:
             ok = true;
-            if (m_lastSampleTimeoutTag) {
-                g_source_remove(m_lastSampleTimeoutTag);
-                m_lastSampleTimeoutTag = 0;
-            }
-            m_lastSampleTimeoutTag = g_timeout_add(s_lastSampleTimeoutMsec, GSourceFunc(appendPipelineLastSampleTimeout), this);
+            //cancelLastSampleTimer();
+            //scheduleLastSampleTimer();
             break;
         case LastSample:
             ok = true;
-            if (m_lastSampleTimeoutTag) {
-                g_source_remove(m_lastSampleTimeoutTag);
-                m_lastSampleTimeoutTag = 0;
-            }
+            cancelLastSampleTimer();
+            emitCurrentSample();
+            m_currentSample = nullptr;
             m_mediaSourceClient->didReceiveAllPendingSamples(m_sourceBufferPrivate.get());
             if (m_abortPending)
                 nextAppendStage = Aborting;
@@ -1575,10 +1610,7 @@ void AppendPipeline::setAppendStage(AppendStage newAppendStage)
             break;
         case Invalid:
             ok = true;
-            if (m_lastSampleTimeoutTag) {
-                g_source_remove(m_lastSampleTimeoutTag);
-                m_lastSampleTimeoutTag = 0;
-            }
+            cancelLastSampleTimer();
             break;
         default:
             break;
@@ -1740,6 +1772,44 @@ void AppendPipeline::appSinkCapsChanged()
     gst_caps_unref(caps);
 }
 
+bool AppendPipeline::emitCurrentSample()
+{
+    if (!m_currentSample)
+        return false;
+
+    TRACE_MEDIA_MESSAGE("append: trackId=%s PTS=%f presentationSize=%.0fx%.0f duration=%f, %" GST_TIME_FORMAT, m_currentSample->trackID().string().utf8().data(), m_currentSample->presentationTime().toFloat(), m_currentSample->presentationSize().width(), m_currentSample->presentationSize().height(), m_currentSample->duration().toFloat(), GST_TIME_ARGS(toGstClockTime(m_currentSample->duration().toFloat())));
+
+    // If we're beyond the duration, ignore this sample and the remaining ones.
+    MediaTime duration = m_mediaSourceClient->duration();
+    if (duration.isValid() && !duration.indefiniteTime() && m_currentSample->presentationTime() > duration) {
+        LOG_MEDIA_MESSAGE("Detected sample (%f) beyond the duration (%f), declaring LastSample", m_currentSample->presentationTime().toFloat(), duration.toFloat());
+        return false;
+    }
+
+    // Add a fake sample if a gap is detected before the first sample
+    if (m_currentSample->decodeTime() == MediaTime::zeroTime() &&
+        m_currentSample->presentationTime() > MediaTime::zeroTime() &&
+        m_currentSample->presentationTime() <= MediaTime::createWithDouble(0.1)) {
+        LOG_MEDIA_MESSAGE("Adding fake offset");
+        m_currentSample->applyPtsOffset(MediaTime::zeroTime());
+    }
+
+    m_sourceBufferPrivate->didReceiveSample(m_currentSample);
+    setAppendStage(Sampling);
+    return true;
+}
+
+bool AppendPipeline::flushCurrentSample()
+{
+    LOG_MEDIA_MESSAGE("Flushing current media sample: %p", m_currentSample.get());
+    if (!m_currentSample)
+        return false;
+
+    emitCurrentSample();
+    m_currentSample = nullptr;
+    return true;
+}
+
 void AppendPipeline::appSinkNewSample(GstSample* sample)
 {
     ASSERT(WTF::isMainThread());
@@ -1758,31 +1828,33 @@ void AppendPipeline::appSinkNewSample(GstSample* sample)
         return;
     }
 
-    RefPtr<GStreamerMediaSample> mediaSample = WebCore::GStreamerMediaSample::create(sample, m_presentationSize, trackId());
-
-    TRACE_MEDIA_MESSAGE("append: trackId=%s PTS=%f presentationSize=%.0fx%.0f", mediaSample->trackID().string().utf8().data(), mediaSample->presentationTime().toFloat(), mediaSample->presentationSize().width(), mediaSample->presentationSize().height());
-
-    // If we're beyond the duration, ignore this sample and the remaining ones.
-    MediaTime duration = m_mediaSourceClient->duration();
-    if (duration.isValid() && !duration.indefiniteTime() && mediaSample->presentationTime() > duration) {
-        LOG_MEDIA_MESSAGE("Detected sample (%f) beyond the duration (%f), declaring LastSample", mediaSample->presentationTime().toFloat(), duration.toFloat());
-        setAppendStage(LastSample);
+    if (!sample) {
         m_flowReturn = GST_FLOW_OK;
         g_cond_signal(&m_newSampleCondition);
         g_mutex_unlock(&m_newSampleMutex);
         return;
     }
 
-    // Add a fake sample if a gap is detected before the first sample
-    if (mediaSample->decodeTime() == MediaTime::zeroTime() &&
-        mediaSample->presentationTime() > MediaTime::zeroTime() &&
-        mediaSample->presentationTime() <= MediaTime::createWithDouble(0.1)) {
-         LOG_MEDIA_MESSAGE("Adding fake offset");
-        mediaSample->applyPtsOffset(MediaTime::zeroTime());
+    setAppendStage(Sampling);
+    if (!m_currentSample) {
+        m_currentSample = GStreamerMediaSample::create(sample, m_presentationSize, trackId());
+    } else if (m_currentSample->size() >= 20) {
+        // FIXME: make buffer list size limit configurable depending on total
+        // raw data append size and media type.
+        if (!emitCurrentSample()) {
+            setAppendStage(LastSample);
+            // MORE ?
+        }
+        m_currentSample = GStreamerMediaSample::create(sample, m_presentationSize, trackId());
+    } else {
+        m_currentSample->addBuffer(gst_sample_get_buffer(sample));
+        cancelLastSampleTimer();
+        scheduleLastSampleTimer();
     }
 
-    m_sourceBufferPrivate->didReceiveSample(mediaSample);
-    setAppendStage(Sampling);
+    if (m_currentSample)
+        LOG_MEDIA_MESSAGE("%u buffers in current sample, total size: %u bytes", m_currentSample->size(), m_currentSample->sizeInBytes());
+
     m_flowReturn = GST_FLOW_OK;
     g_cond_signal(&m_newSampleCondition);
     g_mutex_unlock(&m_newSampleMutex);
@@ -2185,7 +2257,9 @@ static gboolean appendPipelineDataStarveTimeout(AppendPipeline* ap)
     if (ap->appendStage()==AppendPipeline::AppendStage::Invalid)
         return G_SOURCE_REMOVE;
 
-    ap->setAppendStage(AppendPipeline::DataStarve);
+
+    if (!ap->flushCurrentSample())
+        ap->setAppendStage(AppendPipeline::DataStarve);
     return G_SOURCE_REMOVE;
 }
 
@@ -2193,6 +2267,10 @@ static gboolean appendPipelineLastSampleTimeout(AppendPipeline* ap)
 {
     TRACE_MEDIA_MESSAGE("last sample timer fired");
     if (ap->appendStage()==AppendPipeline::AppendStage::Invalid)
+        return G_SOURCE_REMOVE;
+    if (ap->appendStage()==AppendPipeline::AppendStage::NotStarted)
+        return G_SOURCE_REMOVE;
+    if (ap->appendStage()==AppendPipeline::AppendStage::Ongoing)
         return G_SOURCE_REMOVE;
 
     ap->setAppendStage(AppendPipeline::LastSample);
@@ -2305,10 +2383,11 @@ bool MediaSourceClientGStreamerMSE::append(PassRefPtr<SourceBufferPrivateGStream
 
     RefPtr<SourceBufferPrivateGStreamer> sourceBufferPrivate = prpSourceBufferPrivate;
     RefPtr<AppendPipeline> ap = m_playerPrivate->m_appendPipelinesMap.get(sourceBufferPrivate);
+    ap->cancelLastSampleTimer();
     GstBuffer* buffer = gst_buffer_new_and_alloc(length);
     gst_buffer_fill(buffer, 0, data, length);
 
-    return GST_FLOW_OK == ap->pushNewBuffer(buffer);
+    return ap->pushNewBuffer(buffer) == GST_FLOW_OK;
 }
 
 void MediaSourceClientGStreamerMSE::markEndOfStream(MediaSourcePrivate::EndOfStreamStatus status)

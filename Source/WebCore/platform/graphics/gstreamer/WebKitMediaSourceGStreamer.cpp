@@ -843,29 +843,49 @@ static gboolean app_src_seek_data (GstAppSrc *src, guint64 offset, gpointer user
 }
 
 // METRO FIXME: Use gst_app_src_push_sample() instead when we switch to the appropriate GStreamer version.
-static GstFlowReturn push_sample(GstAppSrc* appsrc, GstSample* sample)
+static GstFlowReturn push_buffer(GstAppSrc* appsrc, GstBuffer* buffer, GstCaps* caps)
 {
-    GstBuffer *buffer;
-    GstCaps *caps;
+    if (caps)
+        gst_app_src_set_caps(appsrc, caps);
+    else
+        GST_WARNING_OBJECT (appsrc, "received sample without caps");
 
-    g_return_val_if_fail (GST_IS_SAMPLE (sample), GST_FLOW_ERROR);
-
-    caps = gst_sample_get_caps (sample);
-    if (caps != NULL) {
-      gst_app_src_set_caps (appsrc, caps);
-    } else {
-      GST_WARNING_OBJECT (appsrc, "received sample without caps");
-    }
-
-    buffer = gst_sample_get_buffer (sample);
-    if (buffer == NULL) {
-      GST_WARNING_OBJECT (appsrc, "received sample without buffer");
-      return GST_FLOW_OK;
+    if (!buffer) {
+        GST_WARNING_OBJECT (appsrc, "received sample without buffer");
+        return GST_FLOW_OK;
     }
 
     // gst_app_src_push_buffer() steals the reference, we need an additional one.
     gst_buffer_ref(buffer);
-    return gst_app_src_push_buffer (appsrc, buffer);
+    return gst_app_src_push_buffer(appsrc, buffer);
+}
+
+static GstFlowReturn webKitMediaSrcPushBuffer(GstAppSrc* appsrc, WebCore::GStreamerMediaSample* mediaSample, double timestampOffset, bool decodeOnly)
+{
+    GstFlowReturn ret = GST_FLOW_OK;
+    GstCaps* caps = nullptr;
+    GstBufferList* buffers = mediaSample->buffers();
+    caps = mediaSample->caps();
+
+    if (!buffers)
+        return GST_FLOW_ERROR;
+
+    gst_app_src_set_size(GST_APP_SRC(appsrc), gst_app_src_get_size(GST_APP_SRC(appsrc)) + mediaSample->sizeInBytes());
+
+    for (unsigned index = 0; index < gst_buffer_list_length(buffers); index++) {
+        GstBuffer* buffer = gst_buffer_list_get(buffers, index);
+
+        if (decodeOnly)
+            GST_BUFFER_FLAG_SET(buffer, GST_BUFFER_FLAG_DECODE_ONLY);
+        else
+            GST_BUFFER_FLAG_UNSET(buffer, GST_BUFFER_FLAG_DECODE_ONLY);
+
+        GST_BUFFER_PTS(buffer) = GST_BUFFER_PTS(buffer) + WebCore::toGstClockTime(static_cast<float>(timestampOffset));
+        ret = push_buffer(GST_APP_SRC(appsrc), buffer, caps);
+        if (ret != GST_FLOW_OK)
+            break;
+    }
+    return ret;
 }
 
 namespace WebCore {
@@ -1281,19 +1301,9 @@ void PlaybackPipeline::flushAndEnqueueNonDisplayingSamples(Vector<RefPtr<MediaSa
 
     for (Vector<RefPtr<MediaSample> >::iterator it = samples.begin(); it != samples.end(); ++it) {
         GStreamerMediaSample* sample = static_cast<GStreamerMediaSample*>(it->get());
-        GstBuffer* buffer = nullptr;
-        if (sample->sample())
-            buffer = gst_sample_get_buffer(sample->sample());
-        if (buffer) {
-            GstSample* gstsample = gst_sample_ref(sample->sample());
+        if (sample->isValid()) {
             lastEnqueuedTime = sample->presentationTime();
-
-            GST_BUFFER_FLAG_SET(buffer, GST_BUFFER_FLAG_DECODE_ONLY);
-            GST_BUFFER_PTS(buffer) = GST_BUFFER_PTS(buffer) + toGstClockTime(static_cast<float>(timestampOffset));
-            push_sample(GST_APP_SRC(appsrc), gstsample);
-            // gst_app_src_push_sample() uses transfer-none for gstsample
-
-            gst_sample_unref(gstsample);
+            webKitMediaSrcPushBuffer(GST_APP_SRC(appsrc), sample, timestampOffset, true);
         }
     }
     GST_OBJECT_LOCK(m_webKitMediaSrc.get());
@@ -1330,18 +1340,9 @@ void PlaybackPipeline::enqueueSample(PassRefPtr<MediaSample> prsample)
     double timestampOffset = stream->sourceBuffer->timestampOffset();
 
     GStreamerMediaSample* sample = static_cast<GStreamerMediaSample*>(rsample.get());
-    if (sample->sample() && gst_sample_get_buffer(sample->sample())) {
-        GstSample* gstsample = gst_sample_ref(sample->sample());
-        GstBuffer* buffer = gst_sample_get_buffer(gstsample);
+    if (sample->isValid()) {
         lastEnqueuedTime = sample->presentationTime();
-
-        GST_BUFFER_FLAG_UNSET(buffer, GST_BUFFER_FLAG_DECODE_ONLY);
-        GST_BUFFER_PTS(buffer) = GST_BUFFER_PTS(buffer) + toGstClockTime(static_cast<float>(timestampOffset));
-        push_sample(GST_APP_SRC(appsrc), gstsample);
-        // gst_app_src_push_sample() uses transfer-none for gstsample
-
-        gst_sample_unref(gstsample);
-
+        webKitMediaSrcPushBuffer(GST_APP_SRC(appsrc), sample, timestampOffset, false);
         GST_OBJECT_LOCK(m_webKitMediaSrc.get());
         stream->lastEnqueuedTime = lastEnqueuedTime;
         GST_OBJECT_UNLOCK(m_webKitMediaSrc.get());

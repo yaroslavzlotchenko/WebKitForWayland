@@ -133,11 +133,13 @@ private:
     MediaTime m_pts, m_dts, m_duration;
     AtomicString m_trackID;
     size_t m_size;
-    GstSample* m_sample;
+    GstBufferList* m_buffers;
+    GstCaps* m_caps;
     FloatSize m_presentationSize;
     MediaSample::SampleFlags m_flags;
 
     GStreamerMediaSample(GstSample* sample, const FloatSize& presentationSize, const AtomicString& trackID);
+    GStreamerMediaSample(GstBuffer* buffer, GstCaps*, const FloatSize& presentationSize, const AtomicString& trackID);
 
 public:
     static PassRefPtr<GStreamerMediaSample> create(GstSample* sample, const FloatSize& presentationSize, const AtomicString& trackID);
@@ -148,16 +150,20 @@ public:
     void applyPtsOffset(MediaTime timestampOffset);
     MediaTime presentationTime() const { return m_pts; }
     MediaTime decodeTime() const { return m_dts; }
-    MediaTime duration() const { return m_duration; }
+    MediaTime duration() const;
     AtomicString trackID() const { return m_trackID; }
     size_t sizeInBytes() const { return m_size; }
-    GstSample* sample() const { return m_sample; }
     FloatSize presentationSize() const { return m_presentationSize; }
     void offsetTimestampsBy(const MediaTime&);
     void setTimestamps(const MediaTime&, const MediaTime&) { }
     SampleFlags flags() const { return m_flags; }
     PlatformSample platformSample() { return PlatformSample(); }
     void dump(PrintStream&) const {}
+    GstCaps* caps() const { return m_caps; }
+    GstBufferList* buffers() const { return m_buffers; }
+    unsigned size() const { return gst_buffer_list_length(m_buffers); }
+    void addBuffer(GstBuffer* buffer);
+    bool isValid() const { return m_pts.isValid(); }
 };
 
 class ContentType;
