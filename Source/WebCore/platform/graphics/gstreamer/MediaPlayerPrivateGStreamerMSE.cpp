@@ -1813,11 +1813,18 @@ void AppendPipeline::didReceiveInitializationSegment()
 {
     ASSERT(WTF::isMainThread());
 
+    MediaTime duration = m_mediaSourceClient->duration();
+    gint64 timeLength = 0;
+    if (gst_element_query_duration(m_qtdemux, GST_FORMAT_TIME, &timeLength) &&
+        static_cast<guint64>(timeLength) != GST_CLOCK_TIME_NONE) {
+        duration = MediaTime(timeLength, GST_SECOND);
+        LOG_MEDIA_MESSAGE("Initial duration: %" GST_TIME_FORMAT, GST_TIME_ARGS(timeLength));
+    }
 
     WebCore::SourceBufferPrivateClient::InitializationSegment initializationSegment;
 
     LOG_MEDIA_MESSAGE("Nofifying SourceBuffer for track %s", m_track->id().string().utf8().data());
-    initializationSegment.duration = m_mediaSourceClient->duration();
+    initializationSegment.duration = duration;
     switch (m_streamType) {
     case Audio:
         {
