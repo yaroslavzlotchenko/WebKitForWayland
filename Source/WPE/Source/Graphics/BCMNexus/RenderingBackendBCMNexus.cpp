@@ -39,9 +39,12 @@
 #include <refsw/nexus_display.h>
 #include <refsw/nexus_core_utils.h>
 #include <refsw/default_nexus.h>
-#include <refsw/nxclient.h>
 #include <tuple>
 #include <EGL/egl.h>
+
+#ifndef PLATFORMSERVER_CLIENT
+    #include <refsw/nxclient.h>
+#endif
 
 namespace WPE {
 
@@ -50,6 +53,8 @@ namespace Graphics {
 RenderingBackendBCMNexus::RenderingBackendBCMNexus() : m_nxplHandle (NULL)
 {
     NEXUS_DisplayHandle displayHandle (NULL);
+
+#ifndef PLATFORMSERVER_CLIENT
     NxClient_AllocSettings allocSettings;
     NxClient_JoinSettings joinSettings;
     NxClient_GetDefaultJoinSettings( &joinSettings );
@@ -57,11 +62,16 @@ RenderingBackendBCMNexus::RenderingBackendBCMNexus() : m_nxplHandle (NULL)
     strcpy( joinSettings.name, "wpe" );
 
     NEXUS_Error rc = NxClient_Join( &joinSettings );
+
     BDBG_ASSERT(!rc);
 
     NxClient_GetDefaultAllocSettings(&allocSettings);
     allocSettings.surfaceClient = 1;
     rc = NxClient_Alloc(&allocSettings, &m_AllocResults);
+#else
+    NEXUS_Error rc = NEXUS_Platform_Join();
+#endif
+
     BDBG_ASSERT(!rc);
 
     NXPL_RegisterNexusDisplayPlatform(&m_nxplHandle, displayHandle);
@@ -70,8 +80,12 @@ RenderingBackendBCMNexus::RenderingBackendBCMNexus() : m_nxplHandle (NULL)
 RenderingBackendBCMNexus::~RenderingBackendBCMNexus()
 {
     NXPL_UnregisterNexusDisplayPlatform(m_nxplHandle);
+
+#ifndef PLATFORMSERVER_CLIENT
     NxClient_Free(&m_AllocResults);
     NxClient_Uninit();
+#endif
+
 }
 
 EGLNativeDisplayType RenderingBackendBCMNexus::nativeDisplay()
