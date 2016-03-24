@@ -27,6 +27,7 @@ endif ()
 
 if (USE_WPE_BACKEND_BCM_NEXUS)
     add_definitions(-DWPE_BACKEND_BCM_NEXUS=1)
+    add_definitions(${EGL_DEFINITIONS})
 endif ()
 
 if (USE_WPE_BACKEND_BCM_RPI)
