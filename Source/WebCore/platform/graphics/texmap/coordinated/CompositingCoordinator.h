@@ -149,6 +149,7 @@ private:
 
     bool m_shouldSyncFrame;
     bool m_didInitializeRootCompositingLayer;
+    bool m_useSharedUpdateAtlas;
     Timer m_releaseInactiveAtlasesTimer;
 
 #if ENABLE(REQUEST_ANIMATION_FRAME)
